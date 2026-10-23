@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from langchain_chroma import Chroma
-from langchain_gigachat import GigaChat, GigaChatEmbeddings
+from langchain_gigachat import GigaChat
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
@@ -48,12 +49,10 @@ _llm = None
 def init_models():
     global _embeddings, _vectorstore, _llm
     
-    logger.info("Инициализация GigaChat-клиентов...")
-    _embeddings = GigaChatEmbeddings(
-        credentials=GIGACHAT_CREDENTIALS,
-        scope=GIGACHAT_SCOPE,
-        model="Embeddings",
-        verify_ssl_certs=False # КРИТИЧЕСКИ ВАЖНО для российского облака
+    logger.info("Инициализация локальных эмбеддингов...")
+    _embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        model_kwargs={'device': 'cpu'}
     )
     
     _llm = GigaChat(
