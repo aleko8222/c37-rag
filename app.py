@@ -58,7 +58,7 @@ def init_models():
     _llm = GigaChat(
         credentials=GIGACHAT_CREDENTIALS,
         scope=GIGACHAT_SCOPE,
-        model="GigaChat-Pro",
+        model="GigaChat-2-Pro",
         temperature=0.1,
         verify_ssl_certs=False
     )
