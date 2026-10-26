@@ -133,19 +133,24 @@ async def chat(req: ChatRequest):
 async def parse_food(req: FoodParseRequest):
     try:
         llm = get_llm()
-        prompt = f"""Ты — эксперт по питанию. Пользователь написал: "{req.text}".
-Разбей этот текст на отдельные продукты и блюда. Оцени их примерный вес, калории, белки, жиры и углеводы.
-Верни ответ СТРОГО в формате JSON-массива, без лишнего текста, без markdown-разметки.
-Формат: [{{"name": "Название", "cal": 100, "prot": 10, "fat": 5, "carb": 20}}]"""
+        # Более короткий и четкий промпт для быстрого ответа
+        prompt = f"""Верни СТРОГО JSON-массив без markdown, без текста до и после.
+Продукты из текста: "{req.text}"
+Формат: [{{"name": "Яйцо", "cal": 70, "prot": 6, "fat": 5, "carb": 1}}]"""
 
         response = llm.invoke(prompt)
         content = response.content.strip()
         
-        if content.startswith("```json"): content = content[7:-3]
-        elif content.startswith("```"): content = content[3:-3]
+        # Находим первую открывающую скобку и последнюю закрывающую
+        start_idx = content.find('[')
+        end_idx = content.rfind(']')
+        
+        if start_idx != -1 and end_idx != -1:
+            content = content[start_idx:end_idx+1]
             
-        food_items = json.loads(content.strip())
+        food_items = json.loads(content)
         return {"items": food_items}
     except Exception as e:
         logger.error(f"Ошибка парсинга еды: {e}")
-        raise HTTPException(status_code=500, detail="Не удалось распознать еду")
+        # В случае ошибки возвращаем пустой список, чтобы фронтенд не падал
+        return {"items": [], "error": str(e)}
