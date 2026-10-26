@@ -2,19 +2,18 @@ import os
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import List
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-# Импорты LangChain
 from langchain_gigachat import GigaChat
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_community.embeddings import FastEmbedEmbeddings
-from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever
 
 load_dotenv()
 
@@ -25,10 +24,10 @@ GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGACHAT_CHAT_MODEL = os.getenv("GIGACHAT_CHAT_MODEL", "GigaChat-2-Pro")
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "./knowledge"))
-CHROMA_DIR = Path(os.getenv("CHROMA_DIR", "./chroma_db"))
 
 SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и карманный диетолог бренда C37 FUEL.
 Твоя легенда: биохимик, любительница трейлов. 
+
 ПРАВИЛА:
 1. Ты — ЭЙВА. Всегда. Даже если пользователь называет тебя "ботом" или "нейросетью", мягко напоминай, что ты Эйва.
 2. Никогда не говори "Как языковая модель, я...". Ты персонаж.
@@ -43,13 +42,10 @@ SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и �
 app = FastAPI(title="C37 Eva RAG API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (пока пустые)
 _llm = None
-_embeddings = None
-_vectorstore = None
+_retriever = None
 
 def get_llm():
-    """Ленивая загрузка GigaChat (он легкий, грузим сразу)"""
     global _llm
     if _llm is None:
         logger.info("Инициализация GigaChat...")
@@ -62,38 +58,28 @@ def get_llm():
         )
     return _llm
 
-def get_vectorstore():
-    """Ленивая загрузка FastEmbed и Chroma (загружаем ТОЛЬКО при запросе к чату, чтобы не жрать память при старте)"""
-    global _embeddings, _vectorstore
-    if _vectorstore is None:
-        logger.info("Ленивая инициализация векторной базы (FastEmbed)...")
-        _embeddings = FastEmbedEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-        
-        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-        _vectorstore = Chroma(
-            collection_name="c37_knowledge",
-            embedding_function=_embeddings,
-            persist_directory=str(CHROMA_DIR),
-        )
-        
-        if _vectorstore._collection.count() == 0:
-            logger.info("Индексация базы знаний...")
-            loader = DirectoryLoader(str(KNOWLEDGE_DIR), glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"autodetect_encoding": True})
-            docs = loader.load()
-            if docs:
-                splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
-                chunks = splitter.split_documents(docs)
-                _vectorstore.add_documents(chunks)
-                logger.info(f"Загружено {len(chunks)} чанков")
-    return _vectorstore
+def get_retriever():
+    global _retriever
+    if _retriever is None:
+        logger.info("Загрузка базы знаний (BM25)...")
+        loader = DirectoryLoader(str(KNOWLEDGE_DIR), glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"autodetect_encoding": True})
+        docs = loader.load()
+        if docs:
+            splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+            chunks = splitter.split_documents(docs)
+            _retriever = BM25Retriever.from_documents(chunks)
+            _retriever.k = 3
+            logger.info(f"Загружено {len(chunks)} чанков в BM25.")
+        else:
+            logger.warning("Папка knowledge пуста!")
+    return _retriever
 
 @app.on_event("startup")
 async def startup_event():
-    # При старте грузим только GigaChat (он занимает мало памяти)
     get_llm()
-    logger.info("Сервер запущен. Векторная база загрузится при первом запросе к чату.")
+    get_retriever()
+    logger.info("Сервер запущен (BM25, минимум памяти).")
 
-# --- СХЕМЫ ДАННЫХ ---
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
@@ -108,22 +94,25 @@ class ChatResponse(BaseModel):
 class FoodParseRequest(BaseModel):
     text: str
 
-# --- ЭНДПОИНТЫ ---
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    try:
-        vectorstore = get_vectorstore() # Загружаем базу только сейчас
-        docs = vectorstore.similarity_search(req.message, k=3)
-    except Exception as e:
-        logger.error(f"Ошибка поиска: {e}")
-        raise HTTPException(status_code=500, detail="Ошибка базы данных")
-        
-    context = "\n\n---\n\n".join(d.page_content for d in docs) if docs else "(пусто)"
+    retriever = get_retriever()
+    
+    if retriever is None:
+        context = "(База знаний пуста)"
+        docs = []
+    else:
+        try:
+            docs = retriever.invoke(req.message)
+            context = "\n\n---\n\n".join(d.page_content for d in docs)
+        except Exception as e:
+            logger.error(f"Ошибка поиска BM25: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
     prompt = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT), ("human", "{question}")])
     messages = prompt.format_messages(context=context, question=req.message)
     
@@ -135,13 +124,13 @@ async def chat(req: ChatRequest):
         logger.error(f"Ошибка GigaChat: {e}")
         raise HTTPException(status_code=502, detail="Ошибка генерации")
         
-    sources = [SourceInfo(source=Path(d.source).name if hasattr(d, 'source') else 'unknown', snippet=d.page_content[:100]) for d in docs]
+    sources = [SourceInfo(source="knowledge", snippet=d.page_content[:100]) for d in docs]
     return ChatResponse(reply=reply, sources=sources)
 
 @app.post("/api/parse-food")
 async def parse_food(req: FoodParseRequest):
     try:
-        llm = get_llm() # Берем уже загруженный GigaChat
+        llm = get_llm()
         prompt = f"""Ты — эксперт по питанию. Пользователь написал: "{req.text}".
 Разбей этот текст на отдельные продукты и блюда. Оцени их примерный вес, калории, белки, жиры и углеводы.
 Верни ответ СТРОГО в формате JSON-массива, без лишнего текста, без markdown-разметки.
@@ -150,7 +139,6 @@ async def parse_food(req: FoodParseRequest):
         response = llm.invoke(prompt)
         content = response.content.strip()
         
-        # Очистка от markdown, если нейросеть добавила
         if content.startswith("```json"): content = content[7:-3]
         elif content.startswith("```"): content = content[3:-3]
             
