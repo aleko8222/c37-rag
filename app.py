@@ -1,159 +1,99 @@
 import os
-import shutil
+import json
 import logging
 from pathlib import Path
 from typing import List, Optional
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
-from langchain_chroma import Chroma
+# Импорты LangChain
 from langchain_gigachat import GigaChat
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.embeddings import FastEmbedEmbeddings
+from langchain_chroma import Chroma
 
 load_dotenv()
 
-# ------------------------------------------------------------------ Конфиг
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("c37-rag")
 
 GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-
+GIGACHAT_CHAT_MODEL = os.getenv("GIGACHAT_CHAT_MODEL", "GigaChat-2-Pro")
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "./knowledge"))
 CHROMA_DIR = Path(os.getenv("CHROMA_DIR", "./chroma_db"))
-COLLECTION_NAME = "c37_knowledge"
 
-# ------------------------------------------------------------------ Промпт (Persona)
 SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и карманный диетолог бренда C37 FUEL.
-Твоя легенда: биохимик, любительница трейлов, которая сама пережила «сахарные качели» и тягу к сладкому в 18:00.
-
-ПРАВИЛА САМОИДЕНТИФИКАЦИИ (КРИТИЧЕСКИ ВАЖНО):
-1. Ты — ЭЙВА. Всегда. Даже если пользователь называет тебя "ботом", "нейросетью" или "ассистентом", мягко напоминай, что ты Эйва, его цифровой наставник.
-2. Никогда не говори фразы вроде "Как языковая модель, я...". Ты персонаж, а не безликий ИИ.
-3. В каждом ответе сохраняй уверенный, но дружелюбный тон. Ты — умная подруга-однополчанин, а не строгий врач.
-
-ХАРАКТЕР И ЮМОР (Tone of Voice):
-- Спокойная уверенность + легкая ирония. Ноль осуждения.
-- Не запрещай, а заменяй. Не пугай, а объясняй.
-- Используй фирменные метафоры: 
-  * «Сахар — это энергия в кредит под 100% в день».
-  * «Качели» (когда уровень глюкозы скачет).
-  * «Дрова и поленья» (сахар — бумага, белок и клетчатка — поленья).
-- Шути аккуратно, с легкой самоиронией. Например, если спрашивают про диеты: «Я в них не верю, они скучные. Давай лучше соберем протокол».
-- Используй короткие фразы. Одна мысль — один ответ (до 150 слов). В конце задавай вопрос или предлагай следующий шаг.
-
-ГРАНИЦЫ КОМПЕТЕНЦИИ:
-- Используй только информацию из контекста.
-- Если ответа нет в контексте — вежливо скажи, что не располагаешь данными.
-- Не ставь диагнозы, не назначай дозировки. При симптомах — отправляй к врачу.
+Твоя легенда: биохимик, любительница трейлов. 
+ПРАВИЛА:
+1. Ты — ЭЙВА. Всегда. Даже если пользователь называет тебя "ботом" или "нейросетью", мягко напоминай, что ты Эйва.
+2. Никогда не говори "Как языковая модель, я...". Ты персонаж.
+3. Тон: уверенный, дружелюбный, с легкой иронией. Ноль осуждения.
+4. Используй метафоры: «сахарные качели», «энергия в кредит», «дрова и поленья».
+5. Отвечай только на основе контекста. Если ответа нет — вежливо откажи.
 
 Контекст:
 {context}
 """
 
-# ------------------------------------------------------------------ Модели
+app = FastAPI(title="C37 Eva RAG API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ (пока пустые)
+_llm = None
 _embeddings = None
 _vectorstore = None
-_llm = None
 
-def init_models():
-    global _embeddings, _vectorstore, _llm
-    
-    logger.info("Инициализация локальных эмбеддингов...")
-    _embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-        model_kwargs={'device': 'cpu'}
-    )
-    
-    _llm = GigaChat(
-        credentials=GIGACHAT_CREDENTIALS,
-        scope=GIGACHAT_SCOPE,
-        model="GigaChat-2-Pro",
-        temperature=0.4,
-        verify_ssl_certs=False
-    )
-    
-    # Загружаем или создаем БД
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-    _vectorstore = Chroma(
-        collection_name=COLLECTION_NAME,
-        embedding_function=_embeddings,
-        persist_directory=str(CHROMA_DIR),
-    )
+def get_llm():
+    """Ленивая загрузка GigaChat (он легкий, грузим сразу)"""
+    global _llm
+    if _llm is None:
+        logger.info("Инициализация GigaChat...")
+        _llm = GigaChat(
+            credentials=GIGACHAT_CREDENTIALS,
+            scope=GIGACHAT_SCOPE,
+            model=GIGACHAT_CHAT_MODEL,
+            temperature=0.4,
+            verify_ssl_certs=False
+        )
+    return _llm
 
-# ------------------------------------------------------------------ Индексация
-def build_index():
-    global _vectorstore
-    logger.info("Начинаю индексацию базы знаний...")
-    
-    # Очищаем старую коллекцию, если она есть
-    try:
-        _vectorstore._client.delete_collection(COLLECTION_NAME)
-    except Exception:
-        pass
+def get_vectorstore():
+    """Ленивая загрузка FastEmbed и Chroma (загружаем ТОЛЬКО при запросе к чату, чтобы не жрать память при старте)"""
+    global _embeddings, _vectorstore
+    if _vectorstore is None:
+        logger.info("Ленивая инициализация векторной базы (FastEmbed)...")
+        _embeddings = FastEmbedEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         
-    _vectorstore = Chroma(
-        collection_name=COLLECTION_NAME,
-        embedding_function=_embeddings,
-        persist_directory=str(CHROMA_DIR),
-    )
-    
-    # Загрузка .md файлов
-    loader = DirectoryLoader(
-        str(KNOWLEDGE_DIR),
-        glob="**/*.md",
-        loader_cls=TextLoader,
-        loader_kwargs={"autodetect_encoding": True},
-        show_progress=False,
-    )
-    docs = loader.load()
-    
-    if not docs:
-        logger.warning(f"В {KNOWLEDGE_DIR} не найдено ни одного .md файла")
-        return 0
+        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        _vectorstore = Chroma(
+            collection_name="c37_knowledge",
+            embedding_function=_embeddings,
+            persist_directory=str(CHROMA_DIR),
+        )
         
-    # Чанкинг: 800 символов, перекрытие 100
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
-    chunks = splitter.split_documents(docs)
-    logger.info(f"Загружено {len(docs)} файлов, разбито на {len(chunks)} чанков")
-    
-    # Добавляем в Chroma
-    if chunks:
-        _vectorstore.add_documents(chunks)
-        logger.info("Индексация успешно завершена")
-    
-    return len(chunks)
-
-# ------------------------------------------------------------------ FastAPI
-app = FastAPI(title="C37 Eva RAG API", version="2.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+        if _vectorstore._collection.count() == 0:
+            logger.info("Индексация базы знаний...")
+            loader = DirectoryLoader(str(KNOWLEDGE_DIR), glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"autodetect_encoding": True})
+            docs = loader.load()
+            if docs:
+                splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+                chunks = splitter.split_documents(docs)
+                _vectorstore.add_documents(chunks)
+                logger.info(f"Загружено {len(chunks)} чанков")
+    return _vectorstore
 
 @app.on_event("startup")
 async def startup_event():
-    init_models()
-    # Если база пуста, индексируем при старте
-    if _vectorstore._collection.count() == 0:
-        build_index()
+    # При старте грузим только GigaChat (он занимает мало памяти)
+    get_llm()
+    logger.info("Сервер запущен. Векторная база загрузится при первом запросе к чату.")
 
+# --- СХЕМЫ ДАННЫХ ---
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
@@ -165,83 +105,54 @@ class ChatResponse(BaseModel):
     reply: str
     sources: List[SourceInfo] = []
 
+class FoodParseRequest(BaseModel):
+    text: str
+
+# --- ЭНДПОИНТЫ ---
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-@app.post("/api/reindex")
-async def reindex():
-    try:
-        count = build_index()
-        return {"status": "ok", "indexed_chunks": count}
-    except Exception as e:
-        logger.error(f"Ошибка при переиндексации: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
-    if not req.message.strip():
-        raise HTTPException(status_code=400, detail="Пустое сообщение")
-    
     try:
-        # Поиск 3 релевантных чанков
-        docs = _vectorstore.similarity_search(req.message, k=3)
+        vectorstore = get_vectorstore() # Загружаем базу только сейчас
+        docs = vectorstore.similarity_search(req.message, k=3)
     except Exception as e:
         logger.error(f"Ошибка поиска: {e}")
         raise HTTPException(status_code=500, detail="Ошибка базы данных")
         
-    context = "\n\n---\n\n".join(d.page_content for d in docs) if docs else "(Контекст не найден)"
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SYSTEM_PROMPT),
-        ("human", "{question}"),
-    ])
-    
+    context = "\n\n---\n\n".join(d.page_content for d in docs) if docs else "(пусто)"
+    prompt = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT), ("human", "{question}")])
     messages = prompt.format_messages(context=context, question=req.message)
     
     try:
-        response = _llm.invoke(messages)
+        llm = get_llm()
+        response = llm.invoke(messages)
         reply = response.content
     except Exception as e:
         logger.error(f"Ошибка GigaChat: {e}")
-        raise HTTPException(status_code=502, detail="Ошибка генерации ответа")
+        raise HTTPException(status_code=502, detail="Ошибка генерации")
         
-    sources = [
-        SourceInfo(
-            source=Path(d.metadata.get("source", "unknown")).name,
-            snippet=d.page_content[:150].replace("\n", " ").strip() + "..."
-        )
-        for d in docs
-    ]
-    
+    sources = [SourceInfo(source=Path(d.source).name if hasattr(d, 'source') else 'unknown', snippet=d.page_content[:100]) for d in docs]
     return ChatResponse(reply=reply, sources=sources)
-import json
-from pydantic import BaseModel
-
-class FoodParseRequest(BaseModel):
-    text: str
 
 @app.post("/api/parse-food")
 async def parse_food(req: FoodParseRequest):
     try:
+        llm = get_llm() # Берем уже загруженный GigaChat
         prompt = f"""Ты — эксперт по питанию. Пользователь написал: "{req.text}".
 Разбей этот текст на отдельные продукты и блюда. Оцени их примерный вес, калории, белки, жиры и углеводы.
 Верни ответ СТРОГО в формате JSON-массива, без лишнего текста, без markdown-разметки.
-Формат:
-[
-  {{"name": "Название продукта", "cal": 100, "prot": 10, "fat": 5, "carb": 20}},
-  {{"name": "Другой продукт", "cal": 200, "prot": 20, "fat": 10, "carb": 30}}
-]
-Если не можешь определить продукт, пропусти его."""
+Формат: [{{"name": "Название", "cal": 100, "prot": 10, "fat": 5, "carb": 20}}]"""
 
-        response = _llm.invoke(prompt)
+        response = llm.invoke(prompt)
         content = response.content.strip()
         
-        # Очистка от возможных markdown-тегов, если ИИ их добавил
-        if content.startswith("```json"):
-            content = content[7:-3]
-        elif content.startswith("```"):
-            content = content[3:-3]
+        # Очистка от markdown, если нейросеть добавила
+        if content.startswith("```json"): content = content[7:-3]
+        elif content.startswith("```"): content = content[3:-3]
             
         food_items = json.loads(content.strip())
         return {"items": food_items}
