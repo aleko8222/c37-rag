@@ -215,3 +215,36 @@ async def chat(req: ChatRequest):
     ]
     
     return ChatResponse(reply=reply, sources=sources)
+import json
+from pydantic import BaseModel
+
+class FoodParseRequest(BaseModel):
+    text: str
+
+@app.post("/api/parse-food")
+async def parse_food(req: FoodParseRequest):
+    try:
+        prompt = f"""Ты — эксперт по питанию. Пользователь написал: "{req.text}".
+Разбей этот текст на отдельные продукты и блюда. Оцени их примерный вес, калории, белки, жиры и углеводы.
+Верни ответ СТРОГО в формате JSON-массива, без лишнего текста, без markdown-разметки.
+Формат:
+[
+  {{"name": "Название продукта", "cal": 100, "prot": 10, "fat": 5, "carb": 20}},
+  {{"name": "Другой продукт", "cal": 200, "prot": 20, "fat": 10, "carb": 30}}
+]
+Если не можешь определить продукт, пропусти его."""
+
+        response = _llm.invoke(prompt)
+        content = response.content.strip()
+        
+        # Очистка от возможных markdown-тегов, если ИИ их добавил
+        if content.startswith("```json"):
+            content = content[7:-3]
+        elif content.startswith("```"):
+            content = content[3:-3]
+            
+        food_items = json.loads(content.strip())
+        return {"items": food_items}
+    except Exception as e:
+        logger.error(f"Ошибка парсинга еды: {e}")
+        raise HTTPException(status_code=500, detail="Не удалось распознать еду")
