@@ -1,8 +1,9 @@
 import os
 import json
 import logging
+import re
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +26,6 @@ GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGACHAT_CHAT_MODEL = os.getenv("GIGACHAT_CHAT_MODEL", "GigaChat-2-Pro")
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "./knowledge"))
 
-# Системный промпт для ЭЙВЫ (чат)
 SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и карманный диетолог бренда C37 FUEL.
 Твоя легенда: биохимик, любительница трейлов. 
 
@@ -42,60 +42,63 @@ SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и �
 {context}
 """
 
+# === БАЗА ПРОДУКТОВ (на 100 грамм) ===
+FOOD_DB = {
+    # Белки
+    "курица": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0, "default_g": 150},
+    "куриная грудка": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0, "default_g": 150},
+    "индейка": {"cal": 104, "prot": 21, "fat": 1.5, "carb": 0, "default_g": 150},
+    "говядина": {"cal": 250, "prot": 26, "fat": 16, "carb": 0, "default_g": 150},
+    "свинина": {"cal": 259, "prot": 27, "fat": 16, "carb": 0, "default_g": 150},
+    "рыба": {"cal": 120, "prot": 20, "fat": 5, "carb": 0, "default_g": 150},
+    "лосось": {"cal": 208, "prot": 20, "fat": 13, "carb": 0, "default_g": 150},
+    "тунец": {"cal": 132, "prot": 28, "fat": 1, "carb": 0, "default_g": 150},
+    "яйцо": {"cal": 70, "prot": 6, "fat": 5, "carb": 1, "default_g": 60},
+    "яйца": {"cal": 140, "prot": 12, "fat": 10, "carb": 2, "default_g": 120},
+    "творог": {"cal": 100, "prot": 15, "fat": 4, "carb": 3, "default_g": 150},
+    "сыр": {"cal": 300, "prot": 20, "fat": 25, "carb": 2, "default_g": 30},
+    "молоко": {"cal": 50, "prot": 3, "fat": 2.5, "carb": 5, "default_g": 200},
+    "кефир": {"cal": 40, "prot": 3, "fat": 1, "carb": 4, "default_g": 200},
+    "йогурт": {"cal": 60, "prot": 5, "fat": 2, "carb": 6, "default_g": 150},
+    
+    # Углеводы
+    "гречка": {"cal": 110, "prot": 4, "fat": 1, "carb": 21, "default_g": 150},
+    "рис": {"cal": 130, "prot": 2.7, "fat": 0.3, "carb": 28, "default_g": 150},
+    "овсянка": {"cal": 150, "prot": 5, "fat": 2, "carb": 28, "default_g": 150},
+    "макароны": {"cal": 158, "prot": 6, "fat": 0.9, "carb": 31, "default_g": 150},
+    "паста": {"cal": 158, "prot": 6, "fat": 0.9, "carb": 31, "default_g": 150},
+    "картофель": {"cal": 77, "prot": 2, "fat": 0.1, "carb": 17, "default_g": 150},
+    "хлеб": {"cal": 265, "prot": 9, "fat": 3, "carb": 49, "default_g": 30},
+    "тост": {"cal": 265, "prot": 9, "fat": 3, "carb": 49, "default_g": 30},
+    "банан": {"cal": 90, "prot": 1, "fat": 0.3, "carb": 23, "default_g": 120},
+    "яблоко": {"cal": 52, "prot": 0.3, "fat": 0.2, "carb": 14, "default_g": 180},
+
+    # Овощи
+    "салат": {"cal": 30, "prot": 1, "fat": 0.3, "carb": 5, "default_g": 150},
+    "овощи": {"cal": 40, "prot": 2, "fat": 0.5, "carb": 7, "default_g": 200},
+    "брокколи": {"cal": 34, "prot": 2.8, "fat": 0.4, "carb": 7, "default_g": 150},
+    "помидор": {"cal": 18, "prot": 0.9, "fat": 0.2, "carb": 4, "default_g": 150},
+    
+    # Фастфуд / Сладкое
+    "пицца": {"cal": 285, "prot": 12, "fat": 10, "carb": 36, "default_g": 250},
+    "бургер": {"cal": 295, "prot": 17, "fat": 14, "carb": 24, "default_g": 200},
+    "торт": {"cal": 350, "prot": 5, "fat": 15, "carb": 50, "default_g": 100},
+    "шоколад": {"cal": 550, "prot": 5, "fat": 32, "carb": 60, "default_g": 30},
+
+    # C37
+    "батончик": {"cal": 425, "prot": 32, "fat": 18, "carb": 30, "default_g": 40},
+    "c37": {"cal": 425, "prot": 32, "fat": 18, "carb": 30, "default_g": 40},
+
+    # Напитки
+    "кофе": {"cal": 5, "prot": 0.3, "fat": 0, "carb": 1, "default_g": 200},
+    "чай": {"cal": 1, "prot": 0, "fat": 0, "carb": 0, "default_g": 200},
+}
+
 app = FastAPI(title="C37 Eva RAG API")
-app.add_middleware(
-    CORSMiddleware, 
-    allow_origins=["*"], 
-    allow_methods=["*"], 
-    allow_headers=["*"]
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 _llm = None
 _retriever = None
-
-# === ЛОКАЛЬНАЯ БАЗА ПРОДУКТОВ (FALLBACK) ===
-# Если GigaChat не справится, мы просто ищем эти слова в тексте
-LOCAL_FOOD_DB = {
-    "яйцо": {"cal": 70, "prot": 6, "fat": 5, "carb": 1},
-    "яйца": {"cal": 140, "prot": 12, "fat": 10, "carb": 2},
-    "курица": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0},
-    "куриная грудка": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0},
-    "гречка": {"cal": 110, "prot": 4, "fat": 1, "carb": 21},
-    "рис": {"cal": 130, "prot": 2.7, "fat": 0.3, "carb": 28},
-    "творог": {"cal": 100, "prot": 15, "fat": 4, "carb": 3},
-    "банан": {"cal": 90, "prot": 1, "fat": 0.3, "carb": 23},
-    "яблоко": {"cal": 95, "prot": 0.5, "fat": 0.3, "carb": 25},
-    "кофе": {"cal": 10, "prot": 0.5, "fat": 0, "carb": 2},
-    "хлеб": {"cal": 80, "prot": 3, "fat": 1, "carb": 15},
-    "тост": {"cal": 80, "prot": 3, "fat": 1, "carb": 15},
-    "батончик": {"cal": 170, "prot": 12, "fat": 7, "carb": 10},
-    "c37": {"cal": 170, "prot": 12, "fat": 7, "carb": 10},
-    "пицца": {"cal": 285, "prot": 12, "fat": 10, "carb": 36},
-    "торт": {"cal": 350, "prot": 5, "fat": 15, "carb": 50},
-    "шоколад": {"cal": 550, "prot": 5, "fat": 32, "carb": 60},
-    "салат": {"cal": 30, "prot": 1, "fat": 0.3, "carb": 5},
-    "овсянка": {"cal": 150, "prot": 5, "fat": 2, "carb": 28},
-    "сыр": {"cal": 300, "prot": 20, "fat": 25, "carb": 2},
-    "молоко": {"cal": 50, "prot": 3, "fat": 2.5, "carb": 5},
-    "кефир": {"cal": 40, "prot": 3, "fat": 1, "carb": 4},
-    "мясо": {"cal": 200, "prot": 25, "fat": 12, "carb": 0},
-    "рыба": {"cal": 120, "prot": 20, "fat": 5, "carb": 0},
-}
-
-def local_food_parse(text: str):
-    text = text.lower()
-    found = []
-    for keyword, macros in LOCAL_FOOD_DB.items():
-        if keyword in text:
-            found.append({
-                "name": keyword.capitalize(),
-                "cal": macros["cal"],
-                "prot": macros["prot"],
-                "fat": macros["fat"],
-                "carb": macros["carb"]
-            })
-    return found
-
 
 def get_llm():
     global _llm
@@ -105,7 +108,7 @@ def get_llm():
             credentials=GIGACHAT_CREDENTIALS,
             scope=GIGACHAT_SCOPE,
             model=GIGACHAT_CHAT_MODEL,
-            temperature=0.1, # Снижаем температуру для более точных ответов
+            temperature=0.1, 
             verify_ssl_certs=False
         )
     return _llm
@@ -115,28 +118,20 @@ def get_retriever():
     if _retriever is None:
         logger.info("Загрузка базы знаний (BM25)...")
         if not KNOWLEDGE_DIR.exists():
-            logger.warning(f"Папка {KNOWLEDGE_DIR} не существует. Создаю пустую.")
             KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-            
         loader = DirectoryLoader(str(KNOWLEDGE_DIR), glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"autodetect_encoding": True})
         docs = loader.load()
-        
         if docs:
             splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
             chunks = splitter.split_documents(docs)
             _retriever = BM25Retriever.from_documents(chunks)
             _retriever.k = 3
-            logger.info(f"Загружено {len(chunks)} чанков в BM25.")
-        else:
-            logger.warning("Папка knowledge пуста!")
     return _retriever
 
 @app.on_event("startup")
 async def startup_event():
     get_llm()
     get_retriever()
-    logger.info("Сервер запущен (BM25, минимум памяти).")
-
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
@@ -151,7 +146,6 @@ class ChatResponse(BaseModel):
 
 class FoodParseRequest(BaseModel):
     text: str
-
 
 @app.get("/health")
 async def health():
@@ -170,7 +164,7 @@ async def chat(req: ChatRequest):
             context = "\n\n---\n\n".join(d.page_content for d in docs)
         except Exception as e:
             logger.error(f"Ошибка поиска BM25: {e}")
-            context = "(Ошибка поиска в базе знаний)"
+            context = "(Ошибка поиска)"
             docs = []
     
     prompt = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT), ("human", "{question}")])
@@ -188,56 +182,90 @@ async def chat(req: ChatRequest):
     return ChatResponse(reply=reply, sources=sources)
 
 
+# === НОВЫЙ ПАРСИНГ ЕДЫ (ГИГАЧАТ ИЗВЛЕКАЕТ, ПИТОН СЧИТАЕТ) ===
 @app.post("/api/parse-food")
 async def parse_food(req: FoodParseRequest):
     logger.info(f"Запрос на парсинг еды: {req.text}")
     
-    # 1. ПЫТАЕМСЯ ЧЕРЕЗ GIGACHAT
+    parsed_items = []
+    
+    # 1. ПРОСИМ GIGACHAT ИЗВЛЕЧЬ ТОЛЬКО НАЗВАНИЯ И ВЕС
     try:
         llm = get_llm()
+        # Даем список продуктов, чтобы GigaChat знал словарь
+        available = ", ".join(FOOD_DB.keys())
+        
         messages = [
-            ("system", "Ты — API парсер еды. Верни СТРОГО валидный JSON-массив. Каждый объект должен иметь ключи: name, cal, prot, fat, carb. Никакого текста."),
-            ("human", f"Текст: {req.text}\nПример: [{{\"name\": \"Яйцо\", \"cal\": 70, \"prot\": 6, \"fat\": 5, \"carb\": 1}}]")
+            ("system", f"""Ты — экстрактор данных из текста о еде.
+Твоя задача: найти в тексте продукты и их вес в граммах. НИКАКИХ расчетов калорий!
+Доступные продукты: {available}
+Если пользователь не указал вес — оставь null.
+
+Верни СТРОГО JSON-массив. Пример:
+[{{"name": "курица", "grams": 270}}, {{"name": "гречка", "grams": 150}}]
+
+Если еды нет — верни []. Никакого текста до или после."""),
+            ("human", f"Текст: {req.text}")
         ]
         
         response = llm.invoke(messages)
         content = response.content.strip()
-        logger.info(f"Сырой ответ от GigaChat: {content}")
+        logger.info(f"GigaChat извлек: {content}")
         
-        start_idx = content.find('[')
-        end_idx = content.rfind(']')
-        
-        if start_idx != -1 and end_idx != -1:
-            json_str = content[start_idx:end_idx+1]
-            food_items = json.loads(json_str)
+        start = content.find('[')
+        end = content.rfind(']')
+        if start != -1 and end != -1:
+            parsed_items = json.loads(content[start:end+1])
             
-            # Проверяем: не пустой ли массив, есть ли там вообще калории (не нули)
-            if food_items and len(food_items) > 0:
-                valid = True
-                total_cal = 0
-                
-                for item in food_items:
-                    # Если GigaChat забыл ключ cal или поставил 0 — считаем ответ невалидным
-                    if 'cal' not in item or float(item.get('cal', 0)) <= 0:
-                        valid = False
-                        break
-                    total_cal += float(item['cal'])
-                
-                if valid and total_cal > 0:
-                    logger.info(f"GigaChat вернул валидные данные: {total_cal} ккал")
-                    return {"items": food_items}
-                else:
-                    logger.warning("GigaChat вернул нули. Игнорируем и идем в локальную базу.")
     except Exception as e:
-        logger.error(f"Ошибка GigaChat: {e}")
+        logger.error(f"GigaChat не справился: {e}")
+
+    # 2. ЕСЛИ GIGACHAT УПАЛ, ИСПОЛЬЗУЕМ ЛОКАЛЬНЫЙ ЭКСТРАКТОР
+    if not parsed_items:
+        logger.info("Использую локальный экстрактор.")
+        text_lower = req.text.lower()
+        for key in FOOD_DB:
+            if key in text_lower:
+                idx = text_lower.find(key)
+                context = text_lower[max(0, idx-20):idx+len(key)+20]
+                grams_match = re.search(r'(\d+)\s*(?:г|грамм|гр)', context)
+                grams = int(grams_match.group(1)) if grams_match else None
+                parsed_items.append({"name": key, "grams": grams})
+
+    if not parsed_items:
+        return {"items": [], "error": "Не удалось найти еду в тексте"}
+
+    # 3. СЧИТАЕМ КАЛОРИИ И БЖУ ПО НАШЕЙ БАЗЕ
+    result_items = []
+    for item in parsed_items:
+        name = item.get("name", "").lower().strip()
+        grams = item.get("grams")
+        
+        found_key = None
+        for key in FOOD_DB:
+            if key in name or name in key:
+                found_key = key
+                break
+        
+        if not found_key:
+            continue
+        
+        product = FOOD_DB[found_key]
+        weight = grams if grams else product["default_g"]
+        
+        factor = weight / 100
+        calc_item = {
+            "name": found_key.capitalize(),
+            "grams": round(weight),
+            "cal": round(product["cal"] * factor),
+            "prot": round(product["prot"] * factor, 1),
+            "fat": round(product["fat"] * factor, 1),
+            "carb": round(product["carb"] * factor, 1),
+        }
+        result_items.append(calc_item)
     
-    # 2. FALLBACK: ЛОКАЛЬНАЯ БАЗА
-    logger.info("Использую локальную базу продуктов.")
-    local_items = local_food_parse(req.text)
+    if not result_items:
+        return {"items": [], "error": "Продукты не распознаны в базе"}
     
-    if local_items:
-        logger.info(f"Локальная база распознала {len(local_items)} продуктов")
-        return {"items": local_items}
-    
-    # 3. ЕСЛИ СОВСЕМ НИЧЕГО НЕ НАШЛИ
-    return {"items": [], "error": "Не удалось распознать еду. Попробуй сказать проще: 'съел яйца и гречку'"}
+    logger.info(f"Итог: {result_items}")
+    return {"items": result_items}
