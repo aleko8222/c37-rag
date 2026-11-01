@@ -195,18 +195,15 @@ async def parse_food(req: FoodParseRequest):
     # 1. ПЫТАЕМСЯ ЧЕРЕЗ GIGACHAT
     try:
         llm = get_llm()
-        
         messages = [
-            ("system", "Ты — API парсер еды. Твоя задача вернуть ТОЛЬКО валидный JSON-массив. Никакого текста до или после. Если еды нет, верни []."),
-            ("human", f"Текст: {req.text}\nФормат ответа: [{{\"name\": \"Яйцо\", \"cal\": 70, \"prot\": 6, \"fat\": 5, \"carb\": 1}}]")
+            ("system", "Ты — API парсер еды. Верни СТРОГО валидный JSON-массив. Каждый объект должен иметь ключи: name, cal, prot, fat, carb. Никакого текста."),
+            ("human", f"Текст: {req.text}\nПример: [{{\"name\": \"Яйцо\", \"cal\": 70, \"prot\": 6, \"fat\": 5, \"carb\": 1}}]")
         ]
         
         response = llm.invoke(messages)
         content = response.content.strip()
-        
         logger.info(f"Сырой ответ от GigaChat: {content}")
         
-        # Вырезаем JSON массив, если GigaChat добавил markdown
         start_idx = content.find('[')
         end_idx = content.rfind(']')
         
@@ -214,27 +211,33 @@ async def parse_food(req: FoodParseRequest):
             json_str = content[start_idx:end_idx+1]
             food_items = json.loads(json_str)
             
+            # Проверяем: не пустой ли массив, есть ли там вообще калории (не нули)
             if food_items and len(food_items) > 0:
-                logger.info(f"GigaChat успешно распознал {len(food_items)} продуктов")
-                return {"items": food_items}
-            else:
-                logger.warning("GigaChat вернул пустой массив []")
-        else:
-            logger.warning(f"GigaChat не вернул массив в ответе: {content}")
-            
-    except json.JSONDecodeError as e:
-        logger.error(f"Ошибка JSON от GigaChat: {e}")
+                valid = True
+                total_cal = 0
+                
+                for item in food_items:
+                    # Если GigaChat забыл ключ cal или поставил 0 — считаем ответ невалидным
+                    if 'cal' not in item or float(item.get('cal', 0)) <= 0:
+                        valid = False
+                        break
+                    total_cal += float(item['cal'])
+                
+                if valid and total_cal > 0:
+                    logger.info(f"GigaChat вернул валидные данные: {total_cal} ккал")
+                    return {"items": food_items}
+                else:
+                    logger.warning("GigaChat вернул нули. Игнорируем и идем в локальную базу.")
     except Exception as e:
-        logger.error(f"Ошибка GigaChat (парсинг еды): {e}")
+        logger.error(f"Ошибка GigaChat: {e}")
     
-    # 2. FALLBACK: ЕСЛИ GIGACHAT НЕ СПРАВИЛСЯ, ИЩЕМ В ЛОКАЛЬНОЙ БАЗЕ
-    logger.info("GigaChat не справился. Использую локальную базу.")
+    # 2. FALLBACK: ЛОКАЛЬНАЯ БАЗА
+    logger.info("Использую локальную базу продуктов.")
     local_items = local_food_parse(req.text)
     
     if local_items:
         logger.info(f"Локальная база распознала {len(local_items)} продуктов")
         return {"items": local_items}
     
-    # 3. ЕСЛИ НИЧЕГО НЕ НАШЛИ
-    logger.warning(f"Не удалось распознать еду в тексте: {req.text}")
+    # 3. ЕСЛИ СОВСЕМ НИЧЕГО НЕ НАШЛИ
     return {"items": [], "error": "Не удалось распознать еду. Попробуй сказать проще: 'съел яйца и гречку'"}
