@@ -15,8 +15,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.retrievers import BM25Retriever
 
+# Настройка логирования
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("c37-rag")
 
@@ -25,6 +25,7 @@ GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
 GIGACHAT_CHAT_MODEL = os.getenv("GIGACHAT_CHAT_MODEL", "GigaChat-2-Pro")
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "./knowledge"))
 
+# Системный промпт для ЭЙВЫ (чат)
 SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и карманный диетолог бренда C37 FUEL.
 Твоя легенда: биохимик, любительница трейлов. 
 
@@ -42,10 +43,59 @@ SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и �
 """
 
 app = FastAPI(title="C37 Eva RAG API")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware, 
+    allow_origins=["*"], 
+    allow_methods=["*"], 
+    allow_headers=["*"]
+)
 
 _llm = None
 _retriever = None
+
+# === ЛОКАЛЬНАЯ БАЗА ПРОДУКТОВ (FALLBACK) ===
+# Если GigaChat не справится, мы просто ищем эти слова в тексте
+LOCAL_FOOD_DB = {
+    "яйцо": {"cal": 70, "prot": 6, "fat": 5, "carb": 1},
+    "яйца": {"cal": 140, "prot": 12, "fat": 10, "carb": 2},
+    "курица": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0},
+    "куриная грудка": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0},
+    "гречка": {"cal": 110, "prot": 4, "fat": 1, "carb": 21},
+    "рис": {"cal": 130, "prot": 2.7, "fat": 0.3, "carb": 28},
+    "творог": {"cal": 100, "prot": 15, "fat": 4, "carb": 3},
+    "банан": {"cal": 90, "prot": 1, "fat": 0.3, "carb": 23},
+    "яблоко": {"cal": 95, "prot": 0.5, "fat": 0.3, "carb": 25},
+    "кофе": {"cal": 10, "prot": 0.5, "fat": 0, "carb": 2},
+    "хлеб": {"cal": 80, "prot": 3, "fat": 1, "carb": 15},
+    "тост": {"cal": 80, "prot": 3, "fat": 1, "carb": 15},
+    "батончик": {"cal": 170, "prot": 12, "fat": 7, "carb": 10},
+    "c37": {"cal": 170, "prot": 12, "fat": 7, "carb": 10},
+    "пицца": {"cal": 285, "prot": 12, "fat": 10, "carb": 36},
+    "торт": {"cal": 350, "prot": 5, "fat": 15, "carb": 50},
+    "шоколад": {"cal": 550, "prot": 5, "fat": 32, "carb": 60},
+    "салат": {"cal": 30, "prot": 1, "fat": 0.3, "carb": 5},
+    "овсянка": {"cal": 150, "prot": 5, "fat": 2, "carb": 28},
+    "сыр": {"cal": 300, "prot": 20, "fat": 25, "carb": 2},
+    "молоко": {"cal": 50, "prot": 3, "fat": 2.5, "carb": 5},
+    "кефир": {"cal": 40, "prot": 3, "fat": 1, "carb": 4},
+    "мясо": {"cal": 200, "prot": 25, "fat": 12, "carb": 0},
+    "рыба": {"cal": 120, "prot": 20, "fat": 5, "carb": 0},
+}
+
+def local_food_parse(text: str):
+    text = text.lower()
+    found = []
+    for keyword, macros in LOCAL_FOOD_DB.items():
+        if keyword in text:
+            found.append({
+                "name": keyword.capitalize(),
+                "cal": macros["cal"],
+                "prot": macros["prot"],
+                "fat": macros["fat"],
+                "carb": macros["carb"]
+            })
+    return found
+
 
 def get_llm():
     global _llm
@@ -55,7 +105,7 @@ def get_llm():
             credentials=GIGACHAT_CREDENTIALS,
             scope=GIGACHAT_SCOPE,
             model=GIGACHAT_CHAT_MODEL,
-            temperature=0.4,
+            temperature=0.1, # Снижаем температуру для более точных ответов
             verify_ssl_certs=False
         )
     return _llm
@@ -64,8 +114,13 @@ def get_retriever():
     global _retriever
     if _retriever is None:
         logger.info("Загрузка базы знаний (BM25)...")
+        if not KNOWLEDGE_DIR.exists():
+            logger.warning(f"Папка {KNOWLEDGE_DIR} не существует. Создаю пустую.")
+            KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+            
         loader = DirectoryLoader(str(KNOWLEDGE_DIR), glob="**/*.md", loader_cls=TextLoader, loader_kwargs={"autodetect_encoding": True})
         docs = loader.load()
+        
         if docs:
             splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
             chunks = splitter.split_documents(docs)
@@ -82,6 +137,7 @@ async def startup_event():
     get_retriever()
     logger.info("Сервер запущен (BM25, минимум памяти).")
 
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
 
@@ -95,6 +151,7 @@ class ChatResponse(BaseModel):
 
 class FoodParseRequest(BaseModel):
     text: str
+
 
 @app.get("/health")
 async def health():
@@ -113,7 +170,8 @@ async def chat(req: ChatRequest):
             context = "\n\n---\n\n".join(d.page_content for d in docs)
         except Exception as e:
             logger.error(f"Ошибка поиска BM25: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            context = "(Ошибка поиска в базе знаний)"
+            docs = []
     
     prompt = ChatPromptTemplate.from_messages([("system", SYSTEM_PROMPT), ("human", "{question}")])
     messages = prompt.format_messages(context=context, question=req.message)
@@ -123,44 +181,60 @@ async def chat(req: ChatRequest):
         response = llm.invoke(messages)
         reply = response.content
     except Exception as e:
-        logger.error(f"Ошибка GigaChat: {e}")
-        raise HTTPException(status_code=502, detail="Ошибка генерации")
+        logger.error(f"Ошибка GigaChat (чат): {e}")
+        raise HTTPException(status_code=502, detail="Ошибка генерации ответа")
         
     sources = [SourceInfo(source="knowledge", snippet=d.page_content[:100]) for d in docs]
     return ChatResponse(reply=reply, sources=sources)
 
+
 @app.post("/api/parse-food")
 async def parse_food(req: FoodParseRequest):
+    logger.info(f"Запрос на парсинг еды: {req.text}")
+    
+    # 1. ПЫТАЕМСЯ ЧЕРЕЗ GIGACHAT
     try:
         llm = get_llm()
         
-        # Жесткий промпт: просим только массив, без лишних слов
-        prompt = f"""Ты — API парсер еды. Верни СТРОГО валидный JSON-массив, без текста, без markdown, без ```json.
-Если в тексте нет еды, верни [].
-Текст: "{req.text}"
-Формат: [{{"name": "Яйцо", "cal": 70, "prot": 6, "fat": 5, "carb": 1}}]"""
-
-        response = llm.invoke(prompt)
+        messages = [
+            ("system", "Ты — API парсер еды. Твоя задача вернуть ТОЛЬКО валидный JSON-массив. Никакого текста до или после. Если еды нет, верни []."),
+            ("human", f"Текст: {req.text}\nФормат ответа: [{{\"name\": \"Яйцо\", \"cal\": 70, \"prot\": 6, \"fat\": 5, \"carb\": 1}}]")
+        ]
+        
+        response = llm.invoke(messages)
         content = response.content.strip()
         
-        # ЛОГИРУЕМ СЫРОЙ ОТВЕТ, ЧТОБЫ ВИДЕТЬ, ЧТО ВЕРНУЛ GIGACHAT
         logger.info(f"Сырой ответ от GigaChat: {content}")
         
-        # Ищем границы массива
+        # Вырезаем JSON массив, если GigaChat добавил markdown
         start_idx = content.find('[')
         end_idx = content.rfind(']')
         
         if start_idx != -1 and end_idx != -1:
-            content = content[start_idx:end_idx+1]
+            json_str = content[start_idx:end_idx+1]
+            food_items = json.loads(json_str)
             
-        # Пытаемся распарсить JSON
-        food_items = json.loads(content)
-        return {"items": food_items}
-        
+            if food_items and len(food_items) > 0:
+                logger.info(f"GigaChat успешно распознал {len(food_items)} продуктов")
+                return {"items": food_items}
+            else:
+                logger.warning("GigaChat вернул пустой массив []")
+        else:
+            logger.warning(f"GigaChat не вернул массив в ответе: {content}")
+            
     except json.JSONDecodeError as e:
-        logger.error(f"Ошибка JSON от GigaChat: {e}. Ответ был: {content}")
-        # Возвращаем ошибку, чтобы фронтенд показал её пользователю
-        return {"items": [], "error": "GigaChat вернул невалидный JSON"}
+        logger.error(f"Ошибка JSON от GigaChat: {e}")
     except Exception as e:
-        logger.error(f"Общая ошибка парсинга еды: {e}")
-        return {"items": [], "error": str(e)}
+        logger.error(f"Ошибка GigaChat (парсинг еды): {e}")
+    
+    # 2. FALLBACK: ЕСЛИ GIGACHAT НЕ СПРАВИЛСЯ, ИЩЕМ В ЛОКАЛЬНОЙ БАЗЕ
+    logger.info("GigaChat не справился. Использую локальную базу.")
+    local_items = local_food_parse(req.text)
+    
+    if local_items:
+        logger.info(f"Локальная база распознала {len(local_items)} продуктов")
+        return {"items": local_items}
+    
+    # 3. ЕСЛИ НИЧЕГО НЕ НАШЛИ
+    logger.warning(f"Не удалось распознать еду в тексте: {req.text}")
+    return {"items": [], "error": "Не удалось распознать еду. Попробуй сказать проще: 'съел яйца и гречку'"}
