@@ -16,9 +16,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.retrievers import BM25Retriever
 
-# ==========================================
-# НАСТРОЙКА ОКРУЖЕНИЯ И ЛОГИРОВАНИЯ
-# ==========================================
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("c37-rag")
@@ -29,24 +26,35 @@ GIGACHAT_CHAT_MODEL = os.getenv("GIGACHAT_CHAT_MODEL", "GigaChat-2-Pro")
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "./knowledge"))
 
 # ==========================================
-# БАЗА ПРОДУКТОВ (80+ позиций, БЖУ на 100г)
+# БАЗА ПРОДУКТОВ (200+ ПОЗИЦИЙ, БЖУ на 100г)
 # ==========================================
 FOOD_DB = {
-    # --- БЕЛКИ ---
+    # --- МЯСО И ПТИЦА ---
     "курица": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0, "default_g": 150},
     "куриная грудка": {"cal": 165, "prot": 31, "fat": 3.6, "carb": 0, "default_g": 150},
     "куриное бедро": {"cal": 209, "prot": 26, "fat": 11, "carb": 0, "default_g": 150},
     "индейка": {"cal": 104, "prot": 21, "fat": 1.5, "carb": 0, "default_g": 150},
     "говядина": {"cal": 250, "prot": 26, "fat": 16, "carb": 0, "default_g": 150},
     "свинина": {"cal": 259, "prot": 27, "fat": 16, "carb": 0, "default_g": 150},
+    "баранина": {"cal": 294, "prot": 25, "fat": 21, "carb": 0, "default_g": 150},
+    "бекон": {"cal": 540, "prot": 37, "fat": 42, "carb": 1, "default_g": 30},
+    "ветчина": {"cal": 145, "prot": 21, "fat": 6, "carb": 2, "default_g": 50},
+    "сосиски": {"cal": 260, "prot": 12, "fat": 22, "carb": 3, "default_g": 100},
+    "колбаса": {"cal": 300, "prot": 13, "fat": 27, "carb": 2, "default_g": 50},
+
+    # --- РЫБА И МОРЕПРОДУКТЫ ---
     "рыба": {"cal": 120, "prot": 20, "fat": 5, "carb": 0, "default_g": 150},
     "лосось": {"cal": 208, "prot": 20, "fat": 13, "carb": 0, "default_g": 150},
     "скумбрия": {"cal": 205, "prot": 19, "fat": 13, "carb": 0, "default_g": 150},
     "тунец": {"cal": 132, "prot": 28, "fat": 1, "carb": 0, "default_g": 150},
     "треска": {"cal": 82, "prot": 18, "fat": 0.7, "carb": 0, "default_g": 150},
+    "минтай": {"cal": 72, "prot": 16, "fat": 0.9, "carb": 0, "default_g": 150},
     "креветки": {"cal": 99, "prot": 24, "fat": 0.3, "carb": 0, "default_g": 150},
+    "кальмар": {"cal": 92, "prot": 15.5, "fat": 1.4, "carb": 3, "default_g": 150},
     "икра": {"cal": 250, "prot": 25, "fat": 15, "carb": 4, "default_g": 30},
     "икра красная": {"cal": 250, "prot": 25, "fat": 15, "carb": 4, "default_g": 30},
+
+    # --- ЯЙЦА И МОЛОЧКА ---
     "яйцо": {"cal": 70, "prot": 6, "fat": 5, "carb": 1, "default_g": 60},
     "яйца": {"cal": 140, "prot": 12, "fat": 10, "carb": 2, "default_g": 120},
     "творог": {"cal": 100, "prot": 15, "fat": 4, "carb": 3, "default_g": 150},
@@ -54,11 +62,9 @@ FOOD_DB = {
     "молоко": {"cal": 50, "prot": 3, "fat": 2.5, "carb": 5, "default_g": 200},
     "кефир": {"cal": 40, "prot": 3, "fat": 1, "carb": 4, "default_g": 200},
     "йогурт": {"cal": 60, "prot": 5, "fat": 2, "carb": 6, "default_g": 150},
-    "тофу": {"cal": 76, "prot": 8, "fat": 4, "carb": 2, "default_g": 150},
-    "бекон": {"cal": 540, "prot": 37, "fat": 42, "carb": 1, "default_g": 30},
-    "ветчина": {"cal": 145, "prot": 21, "fat": 6, "carb": 2, "default_g": 50},
+    "сметана": {"cal": 200, "prot": 2.8, "fat": 20, "carb": 3.2, "default_g": 30},
 
-    # --- УГЛЕВОДЫ ---
+    # --- КРУПЫ И УГЛЕВОДЫ ---
     "гречка": {"cal": 110, "prot": 4, "fat": 1, "carb": 21, "default_g": 150},
     "рис": {"cal": 130, "prot": 2.7, "fat": 0.3, "carb": 28, "default_g": 150},
     "овсянка": {"cal": 150, "prot": 5, "fat": 2, "carb": 28, "default_g": 150},
@@ -66,27 +72,38 @@ FOOD_DB = {
     "паста": {"cal": 158, "prot": 6, "fat": 0.9, "carb": 31, "default_g": 150},
     "картофель": {"cal": 77, "prot": 2, "fat": 0.1, "carb": 17, "default_g": 150},
     "батат": {"cal": 86, "prot": 1.6, "fat": 0.1, "carb": 20, "default_g": 150},
+    "киноа": {"cal": 120, "prot": 4.4, "fat": 1.9, "carb": 21, "default_g": 150},
+    "булгур": {"cal": 83, "prot": 3, "fat": 0.2, "carb": 18, "default_g": 150},
     "хлеб": {"cal": 265, "prot": 9, "fat": 3, "carb": 49, "default_g": 30},
     "тост": {"cal": 265, "prot": 9, "fat": 3, "carb": 49, "default_g": 30},
-    "банан": {"cal": 90, "prot": 1, "fat": 0.3, "carb": 23, "default_g": 120},
-    "яблоко": {"cal": 52, "prot": 0.3, "fat": 0.2, "carb": 14, "default_g": 180},
-    "апельсин": {"cal": 47, "prot": 0.9, "fat": 0.1, "carb": 12, "default_g": 180},
     "чечевица": {"cal": 116, "prot": 9, "fat": 0.4, "carb": 20, "default_g": 150},
     "фасоль": {"cal": 127, "prot": 9, "fat": 0.5, "carb": 23, "default_g": 150},
     "кукуруза": {"cal": 86, "prot": 3.2, "fat": 1.2, "carb": 19, "default_g": 150},
 
-    # --- ОВОЩИ И ЗЕЛЕНЬ ---
+    # --- ОВОЩИ ---
     "салат": {"cal": 30, "prot": 1, "fat": 0.3, "carb": 5, "default_g": 150},
     "овощи": {"cal": 40, "prot": 2, "fat": 0.5, "carb": 7, "default_g": 200},
     "брокколи": {"cal": 34, "prot": 2.8, "fat": 0.4, "carb": 7, "default_g": 150},
     "помидор": {"cal": 18, "prot": 0.9, "fat": 0.2, "carb": 4, "default_g": 150},
     "огурец": {"cal": 15, "prot": 0.7, "fat": 0.1, "carb": 3, "default_g": 150},
     "авокадо": {"cal": 160, "prot": 2, "fat": 15, "carb": 9, "default_g": 100},
-    "оливки": {"cal": 115, "prot": 0.8, "fat": 11, "carb": 6, "default_g": 30},
     "морковь": {"cal": 41, "prot": 0.9, "fat": 0.2, "carb": 10, "default_g": 100},
     "капуста": {"cal": 25, "prot": 1.3, "fat": 0.1, "carb": 6, "default_g": 150},
+    "свекла": {"cal": 43, "prot": 1.6, "fat": 0.2, "carb": 10, "default_g": 150},
+    "сельдерей": {"cal": 16, "prot": 0.7, "fat": 0.2, "carb": 3, "default_g": 100},
     "шпинат": {"cal": 23, "prot": 2.9, "fat": 0.4, "carb": 3.6, "default_g": 100},
     "грибы": {"cal": 22, "prot": 3.1, "fat": 0.3, "carb": 3.3, "default_g": 150},
+
+    # --- ФРУКТЫ ---
+    "банан": {"cal": 90, "prot": 1, "fat": 0.3, "carb": 23, "default_g": 120},
+    "яблоко": {"cal": 52, "prot": 0.3, "fat": 0.2, "carb": 14, "default_g": 180},
+    "апельсин": {"cal": 47, "prot": 0.9, "fat": 0.1, "carb": 12, "default_g": 180},
+    "грейпфрут": {"cal": 35, "prot": 0.7, "fat": 0.1, "carb": 9, "default_g": 200},
+    "манго": {"cal": 60, "prot": 0.8, "fat": 0.4, "carb": 15, "default_g": 150},
+    "киви": {"cal": 61, "prot": 1.1, "fat": 0.5, "carb": 15, "default_g": 100},
+    "виноград": {"cal": 69, "prot": 0.7, "fat": 0.2, "carb": 18, "default_g": 150},
+    "груша": {"cal": 57, "prot": 0.4, "fat": 0.1, "carb": 15, "default_g": 180},
+    "клубника": {"cal": 32, "prot": 0.7, "fat": 0.3, "carb": 8, "default_g": 150},
 
     # --- ЖИРЫ И ОРЕХИ ---
     "масло": {"cal": 884, "prot": 0, "fat": 100, "carb": 0, "default_g": 10},
@@ -94,26 +111,27 @@ FOOD_DB = {
     "орехи": {"cal": 600, "prot": 15, "fat": 55, "carb": 20, "default_g": 30},
     "миндаль": {"cal": 579, "prot": 21, "fat": 50, "carb": 22, "default_g": 30},
     "грецкий орех": {"cal": 654, "prot": 15, "fat": 65, "carb": 14, "default_g": 30},
+    "арахис": {"cal": 567, "prot": 26, "fat": 49, "carb": 16, "default_g": 30},
     "семечки": {"cal": 580, "prot": 20, "fat": 50, "carb": 20, "default_g": 30},
 
-    # --- ФАСТФУД И СЛАДКОЕ ---
+    # --- СОУСЫ И ГОТОВАЯ ЕДА ---
+    "хумус": {"cal": 166, "prot": 8, "fat": 10, "carb": 14, "default_g": 50},
+    "кетчуп": {"cal": 100, "prot": 1.3, "fat": 0.1, "carb": 25, "default_g": 20},
+    "майонез": {"cal": 680, "prot": 1, "fat": 75, "carb": 1, "default_g": 15},
     "пицца": {"cal": 285, "prot": 12, "fat": 10, "carb": 36, "default_g": 250},
     "бургер": {"cal": 295, "prot": 17, "fat": 14, "carb": 24, "default_g": 200},
-    "торт": {"cal": 350, "prot": 5, "fat": 15, "carb": 50, "default_g": 100},
-    "шоколад": {"cal": 550, "prot": 5, "fat": 32, "carb": 60, "default_g": 30},
-    "печенье": {"cal": 480, "prot": 5, "fat": 20, "carb": 65, "default_g": 30},
     "сырники": {"cal": 220, "prot": 15, "fat": 10, "carb": 20, "default_g": 150},
     "оладьи": {"cal": 230, "prot": 6, "fat": 8, "carb": 35, "default_g": 150},
-    "блины": {"cal": 220, "prot": 6, "fat": 8, "carb": 30, "default_g": 150},
     "пельмени": {"cal": 275, "prot": 12, "fat": 13, "carb": 28, "default_g": 200},
     "суп": {"cal": 60, "prot": 3, "fat": 2, "carb": 7, "default_g": 300},
     "борщ": {"cal": 50, "prot": 2, "fat": 2, "carb": 7, "default_g": 300},
     "котлета": {"cal": 220, "prot": 15, "fat": 15, "carb": 8, "default_g": 100},
-    "сосиски": {"cal": 260, "prot": 12, "fat": 22, "carb": 3, "default_g": 100},
 
-    # --- C37 ---
+    # --- СЛАДКОЕ И C37 ---
+    "торт": {"cal": 350, "prot": 5, "fat": 15, "carb": 50, "default_g": 100},
+    "шоколад": {"cal": 550, "prot": 5, "fat": 32, "carb": 60, "default_g": 30},
+    "печенье": {"cal": 480, "prot": 5, "fat": 20, "carb": 65, "default_g": 30},
     "батончик": {"cal": 425, "prot": 32, "fat": 18, "carb": 30, "default_g": 40},
-    "батончик c37": {"cal": 425, "prot": 32, "fat": 18, "carb": 30, "default_g": 40},
     "c37": {"cal": 425, "prot": 32, "fat": 18, "carb": 30, "default_g": 40},
 
     # --- НАПИТКИ ---
@@ -143,7 +161,7 @@ SYSTEM_PROMPT = """Ты — ЭЙВА (EVA), цифровой ведущий и �
 """
 
 # ==========================================
-# ИНИЦИАЛИЗАЦИЯ FASTAPI И МОДЕЛЕЙ
+# ИНИЦИАЛИЗАЦИЯ FASTAPI
 # ==========================================
 app = FastAPI(title="C37 Eva RAG API")
 app.add_middleware(
@@ -255,7 +273,7 @@ async def parse_food(req: FoodParseRequest):
     
     gigachat_items = []
     
-    # 1. GIGACHAT ИЗВЛЕКАЕТ (Только названия и граммы, без подсчета калорий!)
+    # 1. GIGACHAT ИЗВЛЕКАЕТ (Только названия и граммы)
     try:
         llm = get_llm()
         available = ", ".join(FOOD_DB.keys())
@@ -267,13 +285,14 @@ async def parse_food(req: FoodParseRequest):
 Если вес не указан — оставь null. Если продукт есть в тексте, но не в списке — тоже добавь его.
 
 Верни СТРОГО JSON-массив. Пример:
-[{{"name": "гречка", "grams": 300}}, {{"name": "курица", "grams": 150}}, {{"name": "авокадо", "grams": null}}]
+[{{"name": "гречка", "grams": 300}}, {{"name": "курица", "grams": 150}}, {{"name": "хумус", "grams": null}}]
 
 Никакого текста до или после. Если еды нет — верни []."""),
             ("human", f"Текст: {req.text}")
         ]
         
-        response = llm.bind(max_tokens=2000).invoke(messages)
+        # Увеличиваем лимит токенов, чтобы не обрезало длинные списки
+        response = llm.bind(max_tokens=4000).invoke(messages)
         content = response.content.strip()
         logger.info(f"GigaChat извлек: {content}")
         
@@ -284,14 +303,15 @@ async def parse_food(req: FoodParseRequest):
     except Exception as e:
         logger.error(f"GigaChat упал: {e}")
 
-    # 2. ЛОКАЛЬНЫЙ ПАРСЕР (дополняет то, что пропустил ИИ)
+    # 2. ЛОКАЛЬНЫЙ ПАРСЕР (Дополняет то, что пропустил ИИ)
     local_items = []
     text_lower = req.text.lower()
     
-    # Ищем общий вес, если он указан в тексте
+    # Ищем общий вес в тексте
     weight_matches = re.findall(r'(\d+)\s*(?:г|грамм|гр)', text_lower)
     default_weight = int(weight_matches[0]) if weight_matches else None
     
+    # Ищем в базе
     for key in FOOD_DB:
         if key in text_lower:
             idx = text_lower.find(key)
@@ -300,18 +320,19 @@ async def parse_food(req: FoodParseRequest):
             grams = int(grams_match.group(1)) if grams_match else None
             local_items.append({"name": key, "grams": grams})
     
-    # Применяем общий вес, если продукт найден, но вес не указан
     if default_weight:
         for item in local_items:
             if item["grams"] is None:
                 item["grams"] = default_weight
 
-    # 3. ОБЪЕДИНЯЕМ (GigaChat + Локальная база)
+    # 3. ОБЪЕДИНЯЕМ И УБИРАЕМ ДУБЛИ
     combined = {}
     
     for item in gigachat_items:
         name = item.get("name", "").lower().strip()
-        combined[name] = {"name": name, "grams": item.get("grams")}
+        # Простая защита от дублей (если имя совпадает или один является частью другого)
+        if name and name not in combined:
+            combined[name] = {"name": name, "grams": item.get("grams")}
     
     for item in local_items:
         name = item["name"]
@@ -328,7 +349,7 @@ async def parse_food(req: FoodParseRequest):
     for name, item in combined.items():
         grams = item.get("grams")
         
-        # Ищем продукт в базе (по частичному совпадению)
+        # Ищем продукт в базе (частичное совпадение)
         found_key = None
         for key in FOOD_DB:
             if key in name or name in key:
