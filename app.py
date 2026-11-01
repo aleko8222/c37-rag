@@ -133,24 +133,34 @@ async def chat(req: ChatRequest):
 async def parse_food(req: FoodParseRequest):
     try:
         llm = get_llm()
-        # Более короткий и четкий промпт для быстрого ответа
-        prompt = f"""Верни СТРОГО JSON-массив без markdown, без текста до и после.
-Продукты из текста: "{req.text}"
+        
+        # Жесткий промпт: просим только массив, без лишних слов
+        prompt = f"""Ты — API парсер еды. Верни СТРОГО валидный JSON-массив, без текста, без markdown, без ```json.
+Если в тексте нет еды, верни [].
+Текст: "{req.text}"
 Формат: [{{"name": "Яйцо", "cal": 70, "prot": 6, "fat": 5, "carb": 1}}]"""
 
         response = llm.invoke(prompt)
         content = response.content.strip()
         
-        # Находим первую открывающую скобку и последнюю закрывающую
+        # ЛОГИРУЕМ СЫРОЙ ОТВЕТ, ЧТОБЫ ВИДЕТЬ, ЧТО ВЕРНУЛ GIGACHAT
+        logger.info(f"Сырой ответ от GigaChat: {content}")
+        
+        # Ищем границы массива
         start_idx = content.find('[')
         end_idx = content.rfind(']')
         
         if start_idx != -1 and end_idx != -1:
             content = content[start_idx:end_idx+1]
             
+        # Пытаемся распарсить JSON
         food_items = json.loads(content)
         return {"items": food_items}
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Ошибка JSON от GigaChat: {e}. Ответ был: {content}")
+        # Возвращаем ошибку, чтобы фронтенд показал её пользователю
+        return {"items": [], "error": "GigaChat вернул невалидный JSON"}
     except Exception as e:
-        logger.error(f"Ошибка парсинга еды: {e}")
-        # В случае ошибки возвращаем пустой список, чтобы фронтенд не падал
+        logger.error(f"Общая ошибка парсинга еды: {e}")
         return {"items": [], "error": str(e)}
