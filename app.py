@@ -292,7 +292,6 @@ async def parse_food(req: FoodParseRequest):
             product = FOOD_DB[key]
             weight = grams if grams else product["default_g"]
             
-            # Сохраняем во временный словарь
             combined_items[key] = {"name": key, "grams": weight}
 
     # 2. GIGACHAT (Всегда запускаем, чтобы найти то, чего нет в базе, или уточнить вес)
@@ -300,14 +299,24 @@ async def parse_food(req: FoodParseRequest):
         llm = get_llm()
         available = ", ".join(FOOD_DB.keys())
         
+        # УМНЫЙ ПРОМПТ ДЛЯ ОПРЕДЕЛЕНИЯ ВЕСА
         messages = [
             ("system", f"""Ты — экстрактор данных. Извлеки ВСЕ продукты из текста, не пропуская ни одного.
 НЕ считай калории! Только названия и вес в граммах.
 Доступные продукты: {available}
-Если вес не указан — оставь null. Если продукт есть в тексте, но не в списке — тоже добавь его.
+
+ВАЖНОЕ ПРАВИЛО ПО ВЕСУ:
+- Если пользователь назвал точный вес (например, "200 грамм") — верни его.
+- Если есть множитель ("два яйца", "три куска") — умножь стандартный вес на количество.
+- Если есть описание порции ("кусок", "тарелка", "горсть", "стакан") — оцени вес по контексту:
+  * "кусок" = 30-50 г
+  * "тарелка" = 200-250 г
+  * "горсть" = 30 г
+  * "стакан" = 200 г
+- Если ничего не указано — оставь null (система возьмет стандартную порцию).
 
 Верни СТРОГО JSON-массив. Пример:
-[{{"name": "гречка", "grams": 300}}, {{"name": "хумус", "grams": null}}]
+[{{"name": "сыр", "grams": 30}}, {{"name": "яйца", "grams": 120}}]
 
 Никакого текста до или после. Если еды нет — верни []."""),
             ("human", f"Текст: {req.text}")
@@ -334,7 +343,6 @@ async def parse_food(req: FoodParseRequest):
                         break
                 
                 if found_key:
-                    # Если локальный парсер уже нашел, просто обновляем вес, если он был пустой
                     if found_key in combined_items:
                         if combined_items[found_key]["grams"] is None and grams:
                             combined_items[found_key]["grams"] = grams
@@ -342,7 +350,6 @@ async def parse_food(req: FoodParseRequest):
                         weight = grams if grams else FOOD_DB[found_key]["default_g"]
                         combined_items[found_key] = {"name": found_key, "grams": weight}
                 else:
-                    # Если продукта нет в базе, добавляем как есть (с примерными калориями)
                     if name and name not in combined_items:
                         weight = grams if grams else 100
                         combined_items[name] = {"name": name, "grams": weight, "unknown": True}
@@ -356,7 +363,6 @@ async def parse_food(req: FoodParseRequest):
         name = item["name"]
         weight = item["grams"] if item["grams"] else 100
         
-        # Еще раз проверяем базу (чтобы точно быть уверенным)
         found_key = None
         for db_key in FOOD_DB:
             if db_key in name or name in db_key:
@@ -375,7 +381,6 @@ async def parse_food(req: FoodParseRequest):
                 "carb": round(product["carb"] * factor, 1),
             })
         else:
-            # Неизвестный продукт — берем средние значения (100 ккал / 100г)
             factor = weight / 100
             result_items.append({
                 "name": name.capitalize(),
