@@ -16,6 +16,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.retrievers import BM25Retriever
 
+# ==========================================
+# НАСТРОЙКА ОКРУЖЕНИЯ И ЛОГИРОВАНИЯ
+# ==========================================
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("c37-rag")
@@ -26,7 +29,7 @@ GIGACHAT_CHAT_MODEL = os.getenv("GIGACHAT_CHAT_MODEL", "GigaChat-2-Pro")
 KNOWLEDGE_DIR = Path(os.getenv("KNOWLEDGE_DIR", "./knowledge"))
 
 # ==========================================
-# БАЗА ПРОДУКТОВ (200+ ПОЗИЦИЙ)
+# БАЗА ПРОДУКТОВ (200+ ПОЗИЦИЙ, БЖУ на 100г)
 # ==========================================
 FOOD_DB = {
     # --- МЯСО И ПТИЦА ---
@@ -273,44 +276,32 @@ async def parse_food(req: FoodParseRequest):
     logger.info(f"Запрос на парсинг еды: {req.text}")
     
     text_lower = req.text.lower()
-    result_items = []
-    found_keys = set()
-    
-    # 1. ГЛАВНЫЙ ПАРСЕР: Ищем ВСЕ продукты из базы в тексте
-    # Ищем общий вес в тексте (если пользователь сказал "300 грамм" один раз)
+    combined_items = {}
+
+    # 1. ЛОКАЛЬНЫЙ ПАРСЕР (Ищем всё, что знаем, чтобы точно посчитать БЖУ)
     weight_matches = re.findall(r'(\d+)\s*(?:г|грамм|гр)', text_lower)
     default_weight = int(weight_matches[0]) if weight_matches else None
     
     for key in FOOD_DB:
         if key in text_lower:
             idx = text_lower.find(key)
-            # Ищем вес рядом с продуктом
             context = text_lower[max(0, idx-30):idx+len(key)+30]
             grams_match = re.search(r'(\d+)\s*(?:г|грамм|гр)', context)
             grams = int(grams_match.group(1)) if grams_match else default_weight
             
             product = FOOD_DB[key]
             weight = grams if grams else product["default_g"]
-            factor = weight / 100
             
-            result_items.append({
-                "name": key.capitalize(),
-                "grams": round(weight),
-                "cal": round(product["cal"] * factor),
-                "prot": round(product["prot"] * factor, 1),
-                "fat": round(product["fat"] * factor, 1),
-                "carb": round(product["carb"] * factor, 1),
-            })
-            found_keys.add(key)
+            # Сохраняем во временный словарь
+            combined_items[key] = {"name": key, "grams": weight}
 
-    # 2. ДОПОЛНИТЕЛЬНО: Если локальный парсер нашел мало (меньше 3), просим GigaChat найти остальное
-    if len(result_items) < 3:
-        try:
-            llm = get_llm()
-            available = ", ".join(FOOD_DB.keys())
-            
-            messages = [
-                ("system", f"""Ты — экстрактор данных. Извлеки ВСЕ продукты из текста, не пропуская ни одного.
+    # 2. GIGACHAT (Всегда запускаем, чтобы найти то, чего нет в базе, или уточнить вес)
+    try:
+        llm = get_llm()
+        available = ", ".join(FOOD_DB.keys())
+        
+        messages = [
+            ("system", f"""Ты — экстрактор данных. Извлеки ВСЕ продукты из текста, не пропуская ни одного.
 НЕ считай калории! Только названия и вес в граммах.
 Доступные продукты: {available}
 Если вес не указан — оставь null. Если продукт есть в тексте, но не в списке — тоже добавь его.
@@ -319,64 +310,81 @@ async def parse_food(req: FoodParseRequest):
 [{{"name": "гречка", "grams": 300}}, {{"name": "хумус", "grams": null}}]
 
 Никакого текста до или после. Если еды нет — верни []."""),
-                ("human", f"Текст: {req.text}")
-            ]
+            ("human", f"Текст: {req.text}")
+        ]
+        
+        response = llm.bind(max_tokens=4000).invoke(messages)
+        content = response.content.strip()
+        logger.info(f"GigaChat извлек: {content}")
+        
+        start = content.find('[')
+        end = content.rfind(']')
+        if start != -1 and end != -1:
+            gigachat_items = json.loads(content[start:end+1])
             
-            response = llm.bind(max_tokens=4000).invoke(messages)
-            content = response.content.strip()
-            logger.info(f"GigaChat извлек: {content}")
-            
-            start = content.find('[')
-            end = content.rfind(']')
-            if start != -1 and end != -1:
-                gigachat_items = json.loads(content[start:end+1])
+            for item in gigachat_items:
+                name = item.get("name", "").lower().strip()
+                grams = item.get("grams")
                 
-                for item in gigachat_items:
-                    name = item.get("name", "").lower().strip()
-                    # Пропускаем, если уже нашли
-                    if any(name in k or k in name for k in found_keys):
-                        continue
-                    
-                    # Ищем в базе
-                    found_key = None
-                    for key in FOOD_DB:
-                        if key in name or name in key:
-                            found_key = key
-                            break
-                    
-                    grams = item.get("grams")
-                    
-                    if found_key:
-                        product = FOOD_DB[found_key]
-                        weight = grams if grams else product["default_g"]
-                        factor = weight / 100
-                        
-                        result_items.append({
-                            "name": found_key.capitalize(),
-                            "grams": round(weight),
-                            "cal": round(product["cal"] * factor),
-                            "prot": round(product["prot"] * factor, 1),
-                            "fat": round(product["fat"] * factor, 1),
-                            "carb": round(product["carb"] * factor, 1),
-                        })
-                        found_keys.add(found_key)
+                # Ищем совпадение в базе
+                found_key = None
+                for db_key in FOOD_DB:
+                    if db_key in name or name in db_key:
+                        found_key = db_key
+                        break
+                
+                if found_key:
+                    # Если локальный парсер уже нашел, просто обновляем вес, если он был пустой
+                    if found_key in combined_items:
+                        if combined_items[found_key]["grams"] is None and grams:
+                            combined_items[found_key]["grams"] = grams
                     else:
-                        # Если продукта нет в базе — добавляем с примерными калориями (100 ккал/100г)
+                        weight = grams if grams else FOOD_DB[found_key]["default_g"]
+                        combined_items[found_key] = {"name": found_key, "grams": weight}
+                else:
+                    # Если продукта нет в базе, добавляем как есть (с примерными калориями)
+                    if name and name not in combined_items:
                         weight = grams if grams else 100
-                        result_items.append({
-                            "name": name.capitalize(),
-                            "grams": round(weight),
-                            "cal": round(weight), # ~100 ккал на 100г
-                            "prot": 5.0,
-                            "fat": 5.0,
-                            "carb": 10.0,
-                        })
-                        logger.info(f"Продукт '{name}' нет в базе, добавлен с примерными калориями.")
-        except Exception as e:
-            logger.error(f"GigaChat упал: {e}")
+                        combined_items[name] = {"name": name, "grams": weight, "unknown": True}
+                        
+    except Exception as e:
+        logger.error(f"GigaChat упал: {e}")
 
-    if not result_items:
-        return {"items": [], "error": "Не удалось распознать еду. Попробуй сказать проще."}
+    # 3. СЧИТАЕМ КАЛОРИИ И БЖУ
+    result_items = []
+    for k, item in combined_items.items():
+        name = item["name"]
+        weight = item["grams"] if item["grams"] else 100
+        
+        # Еще раз проверяем базу (чтобы точно быть уверенным)
+        found_key = None
+        for db_key in FOOD_DB:
+            if db_key in name or name in db_key:
+                found_key = db_key
+                break
+                
+        if found_key and not item.get("unknown"):
+            product = FOOD_DB[found_key]
+            factor = weight / 100
+            result_items.append({
+                "name": found_key.capitalize(),
+                "grams": round(weight),
+                "cal": round(product["cal"] * factor),
+                "prot": round(product["prot"] * factor, 1),
+                "fat": round(product["fat"] * factor, 1),
+                "carb": round(product["carb"] * factor, 1),
+            })
+        else:
+            # Неизвестный продукт — берем средние значения (100 ккал / 100г)
+            factor = weight / 100
+            result_items.append({
+                "name": name.capitalize(),
+                "grams": round(weight),
+                "cal": round(100 * factor),
+                "prot": round(5 * factor, 1),
+                "fat": round(5 * factor, 1),
+                "carb": round(10 * factor, 1),
+            })
 
     logger.info(f"Итог парсинга: {result_items}")
     return {"items": result_items}
